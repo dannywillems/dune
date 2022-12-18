@@ -88,6 +88,7 @@ module Source_kind : sig
 
     type t =
       { user : string
+      ; subgroups : string list
       ; repo : string
       ; kind : kind
       }

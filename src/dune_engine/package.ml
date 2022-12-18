@@ -279,18 +279,23 @@ module Source_kind = struct
       | Sourcehut -> "sourcehut"
 
     type t =
-      { user : string
+      { (* FIXME: user should be renamed in owner *)
+        user : string
+            (* GitLab allows classifying repositories in subgroups.
+               Can be empty. *)
+      ; subgroups : string list
       ; repo : string
       ; kind : kind
       }
 
     let dyn_of_kind kind = kind |> to_string |> Dyn.string
 
-    let to_dyn { user; repo; kind } =
+    let to_dyn { user; subgroups; repo; kind } =
       let open Dyn in
       record
         [ ("kind", dyn_of_kind kind)
         ; ("user", string user)
+        ; ("subgroups", (list string) subgroups)
         ; ("repo", string repo)
         ]
 
@@ -300,13 +305,22 @@ module Source_kind = struct
       | Gitlab -> "gitlab.com"
       | Sourcehut -> "sr.ht"
 
-    let base_uri { kind; user; repo } =
+    let base_uri { kind; user; subgroups; repo } =
       let host = host_of_kind kind in
-      sprintf "%s/%s/%s" host
-        (match kind with
-        | Sourcehut -> "~" ^ user
-        | _ -> user)
-        repo
+      match kind with
+      | Gitlab when List.length subgroups <> 0 ->
+        sprintf "%s/%s/%s/%s" host
+          (match kind with
+          | Sourcehut -> "~" ^ user
+          | _ -> user)
+          (String.concat ~sep:"/" subgroups)
+          repo
+      | _ ->
+        sprintf "%s/%s/%s" host
+          (match kind with
+          | Sourcehut -> "~" ^ user
+          | _ -> user)
+          repo
 
     let add_https s = "https://" ^ s
 
@@ -332,8 +346,24 @@ module Source_kind = struct
       |> List.map ~f:(fun (name, kind, since) ->
              let decode =
                let of_string ~loc s =
-                 match String.split ~on:'/' s with
-                 | [ user; repo ] -> k { kind; user; repo }
+                 match (String.split ~on:'/' s, kind) with
+                 | l, Gitlab ->
+                   let len = List.length l in
+                   if len < 2 then
+                     User_error.raise ~loc
+                       [ Pp.textf
+                           "%s repository must be of form user/subgroups/repo \
+                            where subgroups is optional"
+                           name
+                       ]
+                   else
+                     let user = Option.value_exn @@ List.nth l 0 in
+                     let repo = Option.value_exn @@ List.nth l (len - 1) in
+                     let subgroups =
+                       List.filteri l ~f:(fun i _ -> i > 0 && i < len - 1)
+                     in
+                     k { kind; user; subgroups; repo }
+                 | [ user; repo ], _ -> k { kind; user; subgroups = []; repo }
                  | _ ->
                    User_error.raise ~loc
                      [ Pp.textf "%s repository must be of form user/repo" name ]
@@ -347,9 +377,12 @@ module Source_kind = struct
              let constr = to_string kind in
              (constr, decode))
 
-    let encode { user; repo; kind } =
+    let encode { user; subgroups; repo; kind } =
       let forge = to_string kind in
-      let path = user ^ "/" ^ repo in
+      let path =
+        if List.length subgroups = 0 then user ^ "/" ^ repo
+        else user ^ "/" ^ String.concat ~sep:"/" subgroups ^ "/" ^ repo
+      in
       let open Dune_lang.Encoder in
       pair string string (forge, path)
 
@@ -435,6 +468,7 @@ module Info = struct
           (Host
              { kind = Source_kind.Host.Github
              ; user = "username"
+             ; subgroups = []
              ; repo = "reponame"
              })
     ; license = Some [ "LICENSE" ]
